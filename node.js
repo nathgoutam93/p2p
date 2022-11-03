@@ -1,8 +1,36 @@
+import express from "express";
+import { createServer } from "http";
 import { io } from "socket.io-client";
 import { Server } from "socket.io";
 import { createHash } from "crypto";
+import { createWriteStream, mkdir, access } from "fs";
 import readline from "readline";
 import chalk from "chalk";
+import axios from "axios";
+
+const app = express();
+const httpServer = createServer(app);
+
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.json(req.body);
+});
+
+app.get("/file", (req, res) => {
+  console.log(req.body);
+  if (req.body && "fileName" in req.body) {
+    res.download("./" + req.body.fileName, (err) => {
+      if (err) {
+        console.log(err);
+      } else {
+        console.log(req.body.fileName + " BEING SENT...");
+      }
+    });
+  } else {
+    res.json("send a valid file name");
+  }
+});
 
 const log = console.log;
 
@@ -18,6 +46,10 @@ const EVENTS = {
   UPDATE_TABLE: "update-table",
   ALIVE_CHECK: "alive-check",
   ALIVE_ACK: "alive-acknowledge",
+  DOWNLOAD: "download",
+  UPLOAD: "upload",
+  GET_FILE: "get-file",
+  FILE_NOT_PRESENT: "file-not-present",
 };
 
 const QUERY = readline.createInterface({
@@ -29,6 +61,28 @@ function question(Q) {
   return new Promise((r) => {
     QUERY.question(Q, (answer) => {
       r(answer);
+    });
+  });
+}
+
+function create_dir(path) {
+  return new Promise((res, rej) => {
+    access(path, (error) => {
+      // To check if the given directory
+      // already exists or not
+      if (error) {
+        // If current directory does not exist
+        // then create it
+        mkdir(path, (error) => {
+          if (error) {
+            rej(error);
+          } else {
+            res(path);
+          }
+        });
+      } else {
+        res(path);
+      }
     });
   });
 }
@@ -69,6 +123,8 @@ class Node {
     this.finger_ = {};
     this.pingcount_ = 5;
 
+    this.lastRejected_ = "";
+
     this.start_listening();
     this.join(remote_address);
     this.start();
@@ -77,7 +133,7 @@ class Node {
   start() {
     this.print_neighbours();
     this.take_command();
-    this.pingInterval = setInterval(this.ping.bind(this), 500);
+    // this.pingInterval = setInterval(this.ping.bind(this), 500);
     this.updateTableInterval = setInterval(this.update_table.bind(this), 3000);
   }
 
@@ -178,7 +234,7 @@ class Node {
 
   start_listening() {
     // START LISTENING FOR OTHER NODES AND CLIENTS
-    this.socket_listen = new Server({
+    this.socket_listen = new Server(httpServer, {
       cors: {
         origin: "http://127.0.0.1:5500",
         methods: ["GET", "POST"],
@@ -312,9 +368,127 @@ class Node {
           this.pingcount_ = 5;
         }
       });
+
+      socket.on(EVENTS.GET_FILE, (data) => {
+        const path = this.self_.address.split(":")[1];
+        const fileName = data.fileName;
+        const peer = data.sender;
+        log(chalk.whiteBright(`Downloading ${fileName} From ${peer.address}`));
+        axios({
+          method: "GET",
+          url: `http://${peer.address}/file`,
+          responseType: "stream",
+          data: {
+            fileName: fileName,
+          },
+        })
+          .then(function (response) {
+            create_dir(path).then(() => {
+              response.data.pipe(createWriteStream(`${path}/${fileName}`));
+            });
+          })
+          .catch((err) => {
+            console.log(err);
+          });
+
+        socket.disconnect();
+      });
+
+      socket.on(EVENTS.UPLOAD, (data) => {
+        log(data, "from UPLOAD");
+        const path = this.self_.address.split(":")[1];
+        const hash = data.hash;
+        const fileName = data.fileName;
+        const peer = data.request;
+        if (
+          (hash > this.predecessor_.id && hash <= this.self_.id) ||
+          (this.predecessor_.id > this.self_.id && hash > this.predecessor_.id)
+        ) {
+          log(
+            chalk.whiteBright(`Downloading ${fileName} From ${peer.address}`)
+          );
+          axios({
+            method: "GET",
+            url: `http://${peer.address}/file`,
+            responseType: "stream",
+            data: {
+              fileName: fileName,
+            },
+          })
+            .then(function (response) {
+              create_dir(path).then(() => {
+                response.data.pipe(createWriteStream(`${path}/${fileName}`));
+              });
+            })
+            .catch((err) => {
+              console.log(err);
+            });
+        } else {
+          this.sucSocket_.emit(EVENTS.UPLOAD, data);
+        }
+      });
+
+      socket.on(EVENTS.DOWNLOAD, (data) => {
+        log(data, "from DOWNLOAD");
+        const peer = data.request;
+        if (data.fileName !== this.lastRejected_) {
+          const fileName = `./${this.self_.address.split(":")[1]}/${
+            data.fileName
+          }`;
+          access(fileName, (err) => {
+            if (err) {
+              console.log("forwarded");
+              // FORWARD TO SUCCESSOR
+              this.lastRejected_ = data.fileName;
+              const hash = createHash("sha256")
+                .update(data.fileName)
+                .digest("hex");
+              const keys = Object.keys(this.finger_);
+              let i;
+              for (i = 0; i < keys.length; i++) {
+                const n = keys[i];
+                if (this.finger_[n].id >= hash) {
+                  const conn = io(`ws://${this.finger_[n].address}`);
+                  conn.emit(EVENTS.DOWNLOAD, data);
+                  break;
+                }
+              }
+              if (i == keys.length) {
+                // USE NEW CONNECTION AS DOWNLOAD EVENT WILL CUT THIS CONNECTION
+                const conn = io(`ws://${this.successor_.address}`);
+                conn.emit(EVENTS.DOWNLOAD, data);
+              }
+            } else {
+              this.lastRejected_ = "";
+              const conn = io(`ws://${peer.address}`);
+              conn.emit(EVENTS.GET_FILE, {
+                fileName: data.fileName,
+                sender: this.self_,
+                count: 0,
+              });
+            }
+          });
+        } else {
+          const conn = io(`ws://${peer.address}`);
+          conn.emit(
+            EVENTS.FILE_NOT_PRESENT,
+            `404: ${data.fileName} does not exist in the Network`
+          );
+        }
+
+        socket.disconnect();
+      });
+
+      socket.on(EVENTS.FILE_NOT_PRESENT, (message) => {
+        log(chalk.redBright(message));
+
+        socket.disconnect();
+      });
     });
 
-    this.socket_listen.listen(Number(this.self_.address.split(":")[1]));
+    // START LISTENING
+    // this.socket_listen.listen(Number(this.self_.address.split(":")[1]));
+    httpServer.listen(Number(this.self_.address.split(":")[1]));
   }
 
   async take_command() {
@@ -328,11 +502,66 @@ class Node {
         log(chalk.magentaBright("-l or leave to exit"));
         log(chalk.magentaBright("-c or clear to clear console"));
       }
-      // IF WANT TO LEAVE
+
+      // HANDLE SHOWING NEIGHBOUR NODES
+      else if (Input === "neighbours" || Input === "-n") {
+        this.print_neighbours();
+      }
+      // HANDLE SHOWING FINGER TABLE
+      else if (Input === "ftable" || Input === "-ft") {
+        this.print_table();
+      }
+      // HANDLE CLEARING CONSOLE
+      else if (Input === "-c" || Input === "clear") {
+        console.clear();
+      }
+      // HANDLE DOWNLOAD COMMAND
+      else if (Input === "-d" || Input === "download") {
+        const fileName = await question("filename? ->");
+        // USE NEW CONNECTION, AS DOWNLOAD EVENT WILL CUT THIS CONNECTION
+        const conn = io(`ws://${this.successor_.address}`);
+        conn.emit(EVENTS.DOWNLOAD, {
+          fileName: fileName,
+          request: this.self_,
+        });
+      }
+      // HANDLE UPLOAD COMMAND
+      else if (Input === "-u" || Input === "upload") {
+        // ASK THE FILE NAME TO UPLOAD
+        const fileName = await question("filename? ->");
+        // HASH GENERATE THE FILE NAME HASH
+        const hash = createHash("sha256").update(fileName).digest("hex");
+        // CHECK IF THE FILE EXIST
+        access(fileName, (err) => {
+          if (err) {
+            log(chalk.redBright("YOU DONT HAVE SUCH FILE !!"));
+          } else {
+            // IF THE FILE IS PRESENT
+            if (hash <= this.self_.id && hash > this.predecessor_.id) {
+              // IF FILE HASH IS IN BETWEEN PRED & ME
+              // USE NEW CONNECTION, AS GET FILE EVENT WILL CUT THIS CONNECTION
+              const conn = io(`ws://${this.successor_.address}`);
+              conn.emit(EVENTS.GET_FILE, {
+                fileName: fileName,
+                sender: this.self_,
+                count: 0,
+              });
+            } else {
+              this.sucSocket_.emit(EVENTS.UPLOAD, {
+                hash: hash,
+                fileName: fileName,
+                request: this.self_,
+                count: 0,
+              });
+            }
+          }
+        });
+      }
+      // HANLDE LEAVE
       else if (Input === "Leave" || Input === "-l") {
         // CLOSE ALL CONNECTIONS AND STOP LISTENING
         this.socket_listen.close();
-        clearInterval(this.pingInterval);
+        // clearInterval(this.pingInterval);
         clearInterval(this.updateTableInterval);
 
         // MAKE MY PREDECESSOR, MY SUCCESSOR'S PREDECESSOR
@@ -350,12 +579,6 @@ class Node {
         );
 
         log(chalk.bgWhite.black("YOU LEFT THE NETWORK"));
-      } else if (Input === "neighbours" || Input === "-n") {
-        this.print_neighbours();
-      } else if (Input === "ftable" || Input === "-ft") {
-        this.print_table();
-      } else if (Input === "-c" || Input === "clear") {
-        console.clear();
       }
     }
   }
