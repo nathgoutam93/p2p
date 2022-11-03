@@ -18,14 +18,13 @@ app.get("/", (req, res) => {
 });
 
 app.get("/file", (req, res) => {
-  console.log(req.body);
   if (req.body && "fileName" in req.body) {
     res.download("./" + req.body.fileName, (err) => {
-      if (err) {
-        console.log(err);
-      } else {
-        console.log(req.body.fileName + " BEING SENT...");
-      }
+      // if (err) {
+      //   console.log(err);
+      // } else {
+      //   console.log(req.body.fileName + " BEING SENT...");
+      // }
     });
   } else {
     res.json("send a valid file name");
@@ -44,8 +43,8 @@ const EVENTS = {
   UPDATE_LARGEST: "update-largest",
   PING_TABLE: "ping-table",
   UPDATE_TABLE: "update-table",
-  ALIVE_CHECK: "alive-check",
-  ALIVE_ACK: "alive-acknowledge",
+  // ALIVE_CHECK: "alive-check",
+  // ALIVE_ACK: "alive-acknowledge",
   DOWNLOAD: "download",
   UPLOAD: "upload",
   GET_FILE: "get-file",
@@ -85,6 +84,27 @@ function create_dir(path) {
       }
     });
   });
+}
+
+function download_file(url, filename, path) {
+  axios({
+    method: "GET",
+    url: url,
+    responseType: "stream",
+    data: {
+      fileName: filename,
+    },
+  })
+    .then(function (response) {
+      // CREATE NEW DIRECTORY IF NOT PRESENT
+      create_dir(path).then((path) => {
+        // WRITE THIS NEW FILE TO DIRECTORY
+        response.data.pipe(createWriteStream(`${path}/${filename}`));
+      });
+    })
+    .catch((err) => {
+      console.log(err);
+    });
 }
 
 class Address {
@@ -171,34 +191,34 @@ class Node {
     });
   }
 
-  ping() {
-    // IF SUCCESSOR AND GRAND_SUCCESSOR IS SAME, WE WON'T PING
-    if (this.successor_.id === this.grandsuccessor_.id) {
-      return;
-    }
+  // ping() {
+  //   // IF SUCCESSOR AND GRAND_SUCCESSOR IS SAME, WE WON'T PING
+  //   if (this.successor_.id === this.grandsuccessor_.id) {
+  //     return;
+  //   }
 
-    // IF MY SUCCESSOR HAS LEFT
-    if (this.pingcount_ == 0) {
-      this.pingcount_ = 5;
-      // UPDATE MY PREDECESSOR'S GRAND_SUCCESSOR WITH MY GRAND SUCCESSOR
-      this.predSocket_.emit(
-        EVENTS.UPDATE_GRAND_SUCCESSOR,
-        this.grandsuccessor_
-      );
-      // MAKE MY GRAND_SUCCESSOR, MY NEW SUCCESSOR
-      this.successor_ = this.grandsuccessor_;
-      this.sucSocket_ = this.gSucSocket_;
-      // MAKE MYSELF, THE PREDECESSOR OF MY NEW SUCCESSOR
-      this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.self_);
-      // MAKE THIS SUCCESSOR'S SUCCESSOR, MY GRAND SUCCESSOR
-      this.sucSocket_.emit(EVENTS.SET_GRAND_SUCCESSOR);
-      this.print_neighbours();
-    } else {
-      this.pingcount_--;
-      // SEND ALIVE CHECK TO MY SUCCESSOR
-      this.sucSocket_.emit(EVENTS.ALIVE_CHECK, this.self_);
-    }
-  }
+  //   // IF MY SUCCESSOR HAS LEFT
+  //   if (this.pingcount_ == 0) {
+  //     this.pingcount_ = 5;
+  //     // UPDATE MY PREDECESSOR'S GRAND_SUCCESSOR WITH MY GRAND SUCCESSOR
+  //     this.predSocket_.emit(
+  //       EVENTS.UPDATE_GRAND_SUCCESSOR,
+  //       this.grandsuccessor_
+  //     );
+  //     // MAKE MY GRAND_SUCCESSOR, MY NEW SUCCESSOR
+  //     this.successor_ = this.grandsuccessor_;
+  //     this.sucSocket_ = this.gSucSocket_;
+  //     // MAKE MYSELF, THE PREDECESSOR OF MY NEW SUCCESSOR
+  //     this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.self_);
+  //     // MAKE THIS SUCCESSOR'S SUCCESSOR, MY GRAND SUCCESSOR
+  //     this.sucSocket_.emit(EVENTS.SET_GRAND_SUCCESSOR);
+  //     this.print_neighbours();
+  //   } else {
+  //     this.pingcount_--;
+  //     // SEND ALIVE CHECK TO MY SUCCESSOR
+  //     this.sucSocket_.emit(EVENTS.ALIVE_CHECK, this.self_);
+  //   }
+  // }
 
   join(remote_address) {
     if (remote_address) {
@@ -308,6 +328,7 @@ class Node {
       socket.on(EVENTS.UPDATE_PREDECESSOR, (peer) => {
         // MAKE THIS NODE, MY PREDECESSOR
         this.predecessor_ = peer;
+        // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
         this.predSocket_?.close();
         this.predSocket_ = io(`ws://${peer.address}`);
       });
@@ -315,6 +336,7 @@ class Node {
       socket.on(EVENTS.UPDATE_SUCCESSOR, (peer) => {
         // MAKE THIS NODE, MY SUCCESSOR
         this.successor_ = peer;
+        // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
         this.sucSocket_?.close();
         this.sucSocket_ = io(`ws://${peer.address}`);
       });
@@ -322,11 +344,13 @@ class Node {
       socket.on(EVENTS.UPDATE_GRAND_SUCCESSOR, (peer) => {
         // MAKE THIS NODE, MY GRAND_SUCCESSOR
         this.grandsuccessor_ = peer;
+        // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
         this.gSucSocket_?.close();
         this.gSucSocket_ = io(`ws://${peer.address}`);
       });
 
       socket.on(EVENTS.SET_GRAND_SUCCESSOR, () => {
+        // LET PREDECESSOR UPDATE HIS GRAND SUCCESSOR, AS MY SUCCESSOR
         this.predSocket_.emit(EVENTS.UPDATE_GRAND_SUCCESSOR, this.successor_);
       });
 
@@ -358,87 +382,68 @@ class Node {
         socket.disconnect();
       });
 
-      socket.on(EVENTS.ALIVE_CHECK, () => {
-        this.predSocket_.emit(EVENTS.ALIVE_ACK);
-      });
+      // socket.on(EVENTS.ALIVE_CHECK, () => {
+      //   this.predSocket_.emit(EVENTS.ALIVE_ACK);
+      // });
 
-      socket.on(EVENTS.ALIVE_ACK, () => {
-        this.pingcount_++;
-        if (this.pingcount_ > 5) {
-          this.pingcount_ = 5;
-        }
-      });
+      // socket.on(EVENTS.ALIVE_ACK, () => {
+      //   this.pingcount_++;
+      //   if (this.pingcount_ > 5) {
+      //     this.pingcount_ = 5;
+      //   }
+      // });
 
       socket.on(EVENTS.GET_FILE, (data) => {
-        const path = this.self_.address.split(":")[1];
-        const fileName = data.fileName;
         const peer = data.sender;
-        log(chalk.whiteBright(`Downloading ${fileName} From ${peer.address}`));
-        axios({
-          method: "GET",
-          url: `http://${peer.address}/file`,
-          responseType: "stream",
-          data: {
-            fileName: fileName,
-          },
-        })
-          .then(function (response) {
-            create_dir(path).then(() => {
-              response.data.pipe(createWriteStream(`${path}/${fileName}`));
-            });
-          })
-          .catch((err) => {
-            console.log(err);
-          });
-
+        const fileName = data.fileName;
+        const path = `${this.self_.address.split(":")[1]}`;
+        // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
+        download_file(`http://${peer.address}/file`, fileName, path);
+        // CLOSE THE CONNECTION
         socket.disconnect();
       });
 
       socket.on(EVENTS.UPLOAD, (data) => {
-        log(data, "from UPLOAD");
-        const path = this.self_.address.split(":")[1];
         const hash = data.hash;
-        const fileName = data.fileName;
         const peer = data.request;
-        if (
+        const fileName = data.fileName;
+        const path = `./${this.self_.address.split(":")[1]}`;
+        // IF FILE HASH IS IN BETWEEN ME AND MY PRED
+
+        if (this.successor_.id === peer.id) {
+          // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
+          download_file(`http://${peer.address}/file`, fileName, path);
+        } else if (
           (hash > this.predecessor_.id && hash <= this.self_.id) ||
           (this.predecessor_.id > this.self_.id && hash > this.predecessor_.id)
         ) {
-          log(
-            chalk.whiteBright(`Downloading ${fileName} From ${peer.address}`)
-          );
-          axios({
-            method: "GET",
-            url: `http://${peer.address}/file`,
-            responseType: "stream",
-            data: {
-              fileName: fileName,
-            },
-          })
-            .then(function (response) {
-              create_dir(path).then(() => {
-                response.data.pipe(createWriteStream(`${path}/${fileName}`));
-              });
-            })
-            .catch((err) => {
-              console.log(err);
-            });
+          // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
+          download_file(`http://${peer.address}/file`, fileName, path);
         } else {
           this.sucSocket_.emit(EVENTS.UPLOAD, data);
         }
       });
 
       socket.on(EVENTS.DOWNLOAD, (data) => {
-        log(data, "from DOWNLOAD");
+        const fileName = data.fileName;
         const peer = data.request;
-        if (data.fileName !== this.lastRejected_) {
-          const fileName = `./${this.self_.address.split(":")[1]}/${
-            data.fileName
-          }`;
-          access(fileName, (err) => {
+
+        // IF THIS FILE WAS RECENTLY SEARCHED AND NOT FOUND
+        if (fileName === this.lastRejected_) {
+          // UPDATE REQUESTING NODE THAT TTHIS FILE IS NOT PRESENT
+          const conn = io(`ws://${peer.address}`);
+          conn.emit(
+            EVENTS.FILE_NOT_PRESENT,
+            `404: ${fileName} does not exist in the Network`
+          );
+        }
+        // ELSE TRY TO GET THE FILE
+        else {
+          const path = `./${this.self_.address.split(":")[1]}/${fileName}`;
+          // CHECK IF FILE EXIST IN THIS NODE
+          access(path, (err) => {
+            // IF NOT FORWARD DOWNLOAD REQUEST TO SUCCESSOR
             if (err) {
-              console.log("forwarded");
-              // FORWARD TO SUCCESSOR
               this.lastRejected_ = data.fileName;
               const hash = createHash("sha256")
                 .update(data.fileName)
@@ -458,7 +463,9 @@ class Node {
                 const conn = io(`ws://${this.successor_.address}`);
                 conn.emit(EVENTS.DOWNLOAD, data);
               }
-            } else {
+            }
+            // ELSE ASk THE REQUESTING NODE TO DOWNLOAD FROM THIS NODE
+            else {
               this.lastRejected_ = "";
               const conn = io(`ws://${peer.address}`);
               conn.emit(EVENTS.GET_FILE, {
@@ -468,26 +475,21 @@ class Node {
               });
             }
           });
-        } else {
-          const conn = io(`ws://${peer.address}`);
-          conn.emit(
-            EVENTS.FILE_NOT_PRESENT,
-            `404: ${data.fileName} does not exist in the Network`
-          );
         }
 
+        // DISCONNECT THIS CONNECTION
         socket.disconnect();
       });
 
       socket.on(EVENTS.FILE_NOT_PRESENT, (message) => {
         log(chalk.redBright(message));
 
+        // DISCONNECT THIS CONNECTION
         socket.disconnect();
       });
     });
 
     // START LISTENING
-    // this.socket_listen.listen(Number(this.self_.address.split(":")[1]));
     httpServer.listen(Number(this.self_.address.split(":")[1]));
   }
 
@@ -536,9 +538,9 @@ class Node {
           if (err) {
             log(chalk.redBright("YOU DONT HAVE SUCH FILE !!"));
           } else {
-            // IF THE FILE IS PRESENT
+            // IF FILE HASH IS IN BETWEEN PRED & ME
             if (hash <= this.self_.id && hash > this.predecessor_.id) {
-              // IF FILE HASH IS IN BETWEEN PRED & ME
+              // ASK MY SUCCESSOR TO GET THIS FILE FROM ME
               // USE NEW CONNECTION, AS GET FILE EVENT WILL CUT THIS CONNECTION
               const conn = io(`ws://${this.successor_.address}`);
               conn.emit(EVENTS.GET_FILE, {
@@ -547,6 +549,7 @@ class Node {
                 count: 0,
               });
             } else {
+              // ASK MY SUCCESSOR TO UPLOAD THIS FILE
               this.sucSocket_.emit(EVENTS.UPLOAD, {
                 hash: hash,
                 fileName: fileName,
