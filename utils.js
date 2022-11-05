@@ -1,5 +1,6 @@
 import axios from "axios";
-import { createWriteStream, mkdir, access, readdir } from "fs";
+import { privateDecrypt } from "crypto";
+import { createWriteStream, mkdir, access, readdir, writeFile } from "fs";
 import readline from "readline";
 
 export const log = console.log;
@@ -73,20 +74,42 @@ export function create_dir(path) {
   });
 }
 
-export function download_file(url, filename, path) {
+export function download_file(url, filename, path, keys) {
+  const pubKey = keys.publicKey.export({
+    format: "pem",
+    type: "pkcs1",
+  });
+
+  const prvKey = keys.privateKey.export({
+    format: "pem",
+    type: "pkcs1",
+  });
+
   axios({
     method: "GET",
     url: url,
     responseType: "stream",
     data: {
       fileName: filename,
+      publicKey: pubKey,
     },
   })
     .then(function (response) {
       // CREATE NEW DIRECTORY IF NOT PRESENT
       create_dir(path).then((path) => {
+        let data = "";
+        // DECRYPT THE INCOMING DATA
+        response.data.on("data", (chunk) => {
+          const dec = privateDecrypt(prvKey, chunk);
+          data += dec;
+        });
+
         // WRITE THIS NEW FILE TO DIRECTORY
-        response.data.pipe(createWriteStream(`${path}/${filename}`));
+        response.data.on("end", () => {
+          writeFile(`${path}/${filename}`, data, (err) => {
+            if (err) console.log(err);
+          });
+        });
       });
     })
     .catch((err) => {

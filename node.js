@@ -2,7 +2,12 @@ import express from "express";
 import { createServer } from "http";
 import { io } from "socket.io-client";
 import { Server } from "socket.io";
-import { createHash } from "crypto";
+import {
+  createCipheriv,
+  createHash,
+  generateKeyPairSync,
+  publicEncrypt,
+} from "crypto";
 import chalk from "chalk";
 import { get_files, download_file, question, EVENTS, log } from "./utils.js";
 import { createReadStream, access } from "fs";
@@ -17,10 +22,17 @@ app.get("/", (req, res) => {
 });
 
 app.get("/file", (req, res) => {
+  // CHECK IF REQUST BODY HAS FILENAME IN IT
   if (req.body && "fileName" in req.body) {
+    // STREAM THE FILE DATA
     const fileStream = createReadStream("./" + req.body.fileName);
+
     res.attachment(req.body.fileName);
-    fileStream.pipe(res);
+    // ENCRYPT FILE CHUNKS AND SEND AS RESPONSE
+    fileStream.on("data", (chunk) => {
+      const enc = publicEncrypt(req.body.publicKey, chunk);
+      res.send(enc);
+    });
   } else {
     res.json("send a valid file name");
   }
@@ -49,6 +61,8 @@ class Node {
       id: local_address.id,
       address: local_address.address,
     };
+
+    this.keys_ = generateKeyPairSync("rsa", { modulusLength: 1024 });
 
     this.predecessor_ = this.self_;
     this.successor_ = this.self_;
@@ -301,7 +315,12 @@ class Node {
         const fileName = data.fileName;
         const path = `${this.self_.address.split(":")[1]}`;
         // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
-        download_file(`http://${peer.address}/file`, fileName, path);
+        download_file(
+          `http://${peer.address}/file`,
+          fileName,
+          path,
+          this.keys_
+        );
         // CLOSE THE CONNECTION
         socket.disconnect();
       });
@@ -311,10 +330,16 @@ class Node {
         const peer = data.request;
         const fileName = data.fileName;
         const path = `./${this.self_.address.split(":")[1]}`;
+
         // IF I'M THE ONLY NODE
         if (this.successor_.id === peer.id) {
           // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
-          download_file(`http://${peer.address}/file`, fileName, path);
+          download_file(
+            `http://${peer.address}/file`,
+            fileName,
+            path,
+            this.keys_
+          );
         }
         // IF FILE HASH IS IN BETWEEN ME AND MY PRED
         else if (
@@ -322,7 +347,12 @@ class Node {
           (this.predecessor_.id > this.self_.id && hash > this.predecessor_.id)
         ) {
           // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
-          download_file(`http://${peer.address}/file`, fileName, path);
+          download_file(
+            `http://${peer.address}/file`,
+            fileName,
+            path,
+            this.keys_
+          );
         } else {
           this.sucSocket_.emit(EVENTS.UPLOAD, data);
         }
