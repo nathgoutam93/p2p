@@ -3,10 +3,9 @@ import { createServer } from "http";
 import { io } from "socket.io-client";
 import { Server } from "socket.io";
 import { createHash } from "crypto";
-import { createWriteStream, mkdir, access } from "fs";
-import readline from "readline";
 import chalk from "chalk";
-import axios from "axios";
+import { get_files, download_file, question, EVENTS, log } from "./utils.js";
+import { createReadStream, access } from "fs";
 
 const app = express();
 const httpServer = createServer(app);
@@ -19,93 +18,13 @@ app.get("/", (req, res) => {
 
 app.get("/file", (req, res) => {
   if (req.body && "fileName" in req.body) {
-    res.download("./" + req.body.fileName, (err) => {
-      // if (err) {
-      //   console.log(err);
-      // } else {
-      //   console.log(req.body.fileName + " BEING SENT...");
-      // }
-    });
+    const fileStream = createReadStream("./" + req.body.fileName);
+    res.attachment(req.body.fileName);
+    fileStream.pipe(res);
   } else {
     res.json("send a valid file name");
   }
 });
-
-const log = console.log;
-
-const EVENTS = {
-  JOIN: "join",
-  JOINED: "joined",
-  SET_GRAND_SUCCESSOR: "set-grand-successor",
-  UPDATE_PREDECESSOR: "update-predecessor",
-  UPDATE_SUCCESSOR: "update-successor",
-  UPDATE_GRAND_SUCCESSOR: "update-grand-successor",
-  UPDATE_LARGEST: "update-largest",
-  PING_TABLE: "ping-table",
-  UPDATE_TABLE: "update-table",
-  // ALIVE_CHECK: "alive-check",
-  // ALIVE_ACK: "alive-acknowledge",
-  DOWNLOAD: "download",
-  UPLOAD: "upload",
-  GET_FILE: "get-file",
-  FILE_NOT_PRESENT: "file-not-present",
-};
-
-const QUERY = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-
-function question(Q) {
-  return new Promise((r) => {
-    QUERY.question(Q, (answer) => {
-      r(answer);
-    });
-  });
-}
-
-function create_dir(path) {
-  return new Promise((res, rej) => {
-    access(path, (error) => {
-      // To check if the given directory
-      // already exists or not
-      if (error) {
-        // If current directory does not exist
-        // then create it
-        mkdir(path, (error) => {
-          if (error) {
-            rej(error);
-          } else {
-            res(path);
-          }
-        });
-      } else {
-        res(path);
-      }
-    });
-  });
-}
-
-function download_file(url, filename, path) {
-  axios({
-    method: "GET",
-    url: url,
-    responseType: "stream",
-    data: {
-      fileName: filename,
-    },
-  })
-    .then(function (response) {
-      // CREATE NEW DIRECTORY IF NOT PRESENT
-      create_dir(path).then((path) => {
-        // WRITE THIS NEW FILE TO DIRECTORY
-        response.data.pipe(createWriteStream(`${path}/${filename}`));
-      });
-    })
-    .catch((err) => {
-      console.log(err);
-    });
-}
 
 class Address {
   constructor(port = 5000) {
@@ -139,7 +58,7 @@ class Node {
       this.gSucSocket_ =
         io(`ws://${this.self_.address}`);
 
-    this.largest_ = false;
+    // ROUTING TABLE
     this.finger_ = {};
     this.pingcount_ = 5;
 
@@ -153,7 +72,7 @@ class Node {
   start() {
     this.print_neighbours();
     this.take_command();
-    // this.pingInterval = setInterval(this.ping.bind(this), 500);
+    this.pingInterval = setInterval(this.ping.bind(this), 500);
     this.updateTableInterval = setInterval(this.update_table.bind(this), 3000);
   }
 
@@ -174,10 +93,6 @@ class Node {
       chalk.bgMagenta.yellow("GSuc ->"),
       chalk.bgYellow.black(this.grandsuccessor_.address)
     );
-    log(
-      chalk.bgMagenta.yellow("Largest? ->"),
-      chalk.bgYellow.black(this.largest_)
-    );
   }
 
   print_table() {
@@ -191,34 +106,37 @@ class Node {
     });
   }
 
-  // ping() {
-  //   // IF SUCCESSOR AND GRAND_SUCCESSOR IS SAME, WE WON'T PING
-  //   if (this.successor_.id === this.grandsuccessor_.id) {
-  //     return;
-  //   }
+  ping() {
+    if (this.successor_.id === this.self_.id) {
+      return;
+    }
+    if (this.successor_.id === this.grandsuccessor_.id) {
+      return;
+    }
 
-  //   // IF MY SUCCESSOR HAS LEFT
-  //   if (this.pingcount_ == 0) {
-  //     this.pingcount_ = 5;
-  //     // UPDATE MY PREDECESSOR'S GRAND_SUCCESSOR WITH MY GRAND SUCCESSOR
-  //     this.predSocket_.emit(
-  //       EVENTS.UPDATE_GRAND_SUCCESSOR,
-  //       this.grandsuccessor_
-  //     );
-  //     // MAKE MY GRAND_SUCCESSOR, MY NEW SUCCESSOR
-  //     this.successor_ = this.grandsuccessor_;
-  //     this.sucSocket_ = this.gSucSocket_;
-  //     // MAKE MYSELF, THE PREDECESSOR OF MY NEW SUCCESSOR
-  //     this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.self_);
-  //     // MAKE THIS SUCCESSOR'S SUCCESSOR, MY GRAND SUCCESSOR
-  //     this.sucSocket_.emit(EVENTS.SET_GRAND_SUCCESSOR);
-  //     this.print_neighbours();
-  //   } else {
-  //     this.pingcount_--;
-  //     // SEND ALIVE CHECK TO MY SUCCESSOR
-  //     this.sucSocket_.emit(EVENTS.ALIVE_CHECK, this.self_);
-  //   }
-  // }
+    // IF MY SUCCESSOR HAS LEFT
+    if (this.pingcount_ == 0) {
+      console.log("successor left ->" + this.sucSocket_.address);
+      this.pingcount_ = 5;
+      // UPDATE MY PREDECESSOR'S GRAND_SUCCESSOR WITH MY GRAND SUCCESSOR
+      this.predSocket_.emit(
+        EVENTS.UPDATE_GRAND_SUCCESSOR,
+        this.grandsuccessor_
+      );
+      // MAKE MY GRAND_SUCCESSOR, MY NEW SUCCESSOR
+      this.sucSocket_?.close();
+      this.successor_ = this.grandsuccessor_;
+      this.sucSocket_ = io(`ws://${this.successor_.address}`);
+      // MAKE MYSELF, THE PREDECESSOR OF MY NEW SUCCESSOR
+      this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.self_);
+      // MAKE THIS SUCCESSOR'S SUCCESSOR, MY GRAND SUCCESSOR
+      this.sucSocket_.emit(EVENTS.SET_GRAND_SUCCESSOR, this.self_);
+    } else {
+      this.pingcount_--;
+      // SEND ALIVE CHECK TO MY SUCCESSOR
+      this.sucSocket_.emit(EVENTS.ALIVE_CHECK, this.self_);
+    }
+  }
 
   join(remote_address) {
     if (remote_address) {
@@ -249,7 +167,6 @@ class Node {
     this.successor_ = node;
     // EMIT JOINED SIGNAL TO REQUESTING NODE
     this.sucSocket_.emit(EVENTS.JOINED);
-    this.print_neighbours();
   }
 
   start_listening() {
@@ -280,14 +197,6 @@ class Node {
           this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.self_);
           this.sucSocket_.emit(EVENTS.UPDATE_SUCCESSOR, this.self_);
 
-          if (peer.id > this.self_.id) {
-            // IF REQUESTING NODE'S ID IS LARGER THAN ME
-            // MAKE REQUESTING NODE THE LARGEST
-            this.sucSocket_.emit(EVENTS.UPDATE_LARGEST, { val: true });
-            this.largest_ = false;
-          } else {
-            this.largest_ = true;
-          }
           // EMIT JOINED SIGNAL TO THE REQUESTING NODE
           this.sucSocket_.emit(EVENTS.JOINED);
           this.print_neighbours();
@@ -307,13 +216,6 @@ class Node {
           // IF REQUESTING NODE IS IN MID OF ME AND SUCCESSOR
           if (peer.id > this.self_.id || peer.id < this.successor_.id) {
             this.place_node_in_mid(peer);
-
-            // IF REQUISTING NODE ID IS LARGER THAN ME AND I'M LARGEST NOW
-            // MAKE HIM THE LARGEST
-            if (peer.id > this.self_.id && this.largest_) {
-              this.sucSocket_.emit(EVENTS.UPDATE_LARGEST, { val: true });
-              this.largest_ = false;
-            }
           } else {
             // FORWARD JOIN REQUEST TO MY SUCCESSOR
             this.sucSocket_.emit(EVENTS.JOIN, peer);
@@ -331,6 +233,7 @@ class Node {
         // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
         this.predSocket_?.close();
         this.predSocket_ = io(`ws://${peer.address}`);
+        this.print_neighbours();
       });
 
       socket.on(EVENTS.UPDATE_SUCCESSOR, (peer) => {
@@ -339,23 +242,23 @@ class Node {
         // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
         this.sucSocket_?.close();
         this.sucSocket_ = io(`ws://${peer.address}`);
+        this.print_neighbours();
       });
 
       socket.on(EVENTS.UPDATE_GRAND_SUCCESSOR, (peer) => {
+        // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
+        if (this.grandsuccessor_.id !== this.predecessor_.id) {
+          this.gSucSocket_?.close();
+        }
         // MAKE THIS NODE, MY GRAND_SUCCESSOR
         this.grandsuccessor_ = peer;
-        // CLOSE OLD CONNECTION AND CREAT A NEW CONNECTION
-        this.gSucSocket_?.close();
         this.gSucSocket_ = io(`ws://${peer.address}`);
+        this.print_neighbours();
       });
 
-      socket.on(EVENTS.SET_GRAND_SUCCESSOR, () => {
+      socket.on(EVENTS.SET_GRAND_SUCCESSOR, (peer) => {
         // LET PREDECESSOR UPDATE HIS GRAND SUCCESSOR, AS MY SUCCESSOR
         this.predSocket_.emit(EVENTS.UPDATE_GRAND_SUCCESSOR, this.successor_);
-      });
-
-      socket.on(EVENTS.UPDATE_LARGEST, (data) => {
-        this.largest_ = data.val;
       });
 
       socket.on(EVENTS.PING_TABLE, (data) => {
@@ -382,16 +285,16 @@ class Node {
         socket.disconnect();
       });
 
-      // socket.on(EVENTS.ALIVE_CHECK, () => {
-      //   this.predSocket_.emit(EVENTS.ALIVE_ACK);
-      // });
+      socket.on(EVENTS.ALIVE_CHECK, () => {
+        this.predSocket_.emit(EVENTS.ALIVE_ACK);
+      });
 
-      // socket.on(EVENTS.ALIVE_ACK, () => {
-      //   this.pingcount_++;
-      //   if (this.pingcount_ > 5) {
-      //     this.pingcount_ = 5;
-      //   }
-      // });
+      socket.on(EVENTS.ALIVE_ACK, () => {
+        this.pingcount_++;
+        if (this.pingcount_ > 5) {
+          this.pingcount_ = 5;
+        }
+      });
 
       socket.on(EVENTS.GET_FILE, (data) => {
         const peer = data.sender;
@@ -408,12 +311,13 @@ class Node {
         const peer = data.request;
         const fileName = data.fileName;
         const path = `./${this.self_.address.split(":")[1]}`;
-        // IF FILE HASH IS IN BETWEEN ME AND MY PRED
-
+        // IF I'M THE ONLY NODE
         if (this.successor_.id === peer.id) {
           // DOWNLOAD THE FILE FROM THE NODE -> REQUESTING TO UPLOAD
           download_file(`http://${peer.address}/file`, fileName, path);
-        } else if (
+        }
+        // IF FILE HASH IS IN BETWEEN ME AND MY PRED
+        else if (
           (hash > this.predecessor_.id && hash <= this.self_.id) ||
           (this.predecessor_.id > this.self_.id && hash > this.predecessor_.id)
         ) {
@@ -430,7 +334,7 @@ class Node {
 
         // IF THIS FILE WAS RECENTLY SEARCHED AND NOT FOUND
         if (fileName === this.lastRejected_) {
-          // UPDATE REQUESTING NODE THAT TTHIS FILE IS NOT PRESENT
+          // UPDATE REQUESTING NODE THAT THIS FILE IS NOT PRESENT
           const conn = io(`ws://${peer.address}`);
           conn.emit(
             EVENTS.FILE_NOT_PRESENT,
@@ -487,6 +391,22 @@ class Node {
         // DISCONNECT THIS CONNECTION
         socket.disconnect();
       });
+
+      socket.on(EVENTS.GET_DHT, (data) => {
+        if (data.origin === this.self_.id) {
+          delete data.origin;
+          console.log(data);
+        } else {
+          get_files(`./${this.self_.address.split(":")[1]}`).then((files) => {
+            const new_data = {
+              origin: data.origin,
+              files: [...data.files, ...files],
+              nodes: { ...data.nodes, [this.self_.id]: this.self_.address },
+            };
+            this.sucSocket_.emit(EVENTS.GET_DHT, new_data);
+          });
+        }
+      });
     });
 
     // START LISTENING
@@ -499,26 +419,16 @@ class Node {
       const Input = await question(">> ");
 
       if (Input === "-h" || Input === "help") {
-        log(chalk.magentaBright("-n or neighbours to see connections"));
-        log(chalk.magentaBright("-ft or ftable to see finger table"));
-        log(chalk.magentaBright("-l or leave to exit"));
+        log(chalk.magentaBright("-u to upload file to network"));
+        log(chalk.magentaBright("-d to download file from network"));
+        log(chalk.magentaBright("-n to see connections"));
+        log(chalk.magentaBright("-ft to see finger table"));
+        log(chalk.magentaBright("-dht to see all nodes in network"));
+        log(chalk.magentaBright("-l to leave the network"));
         log(chalk.magentaBright("-c or clear to clear console"));
       }
-
-      // HANDLE SHOWING NEIGHBOUR NODES
-      else if (Input === "neighbours" || Input === "-n") {
-        this.print_neighbours();
-      }
-      // HANDLE SHOWING FINGER TABLE
-      else if (Input === "ftable" || Input === "-ft") {
-        this.print_table();
-      }
-      // HANDLE CLEARING CONSOLE
-      else if (Input === "-c" || Input === "clear") {
-        console.clear();
-      }
       // HANDLE DOWNLOAD COMMAND
-      else if (Input === "-d" || Input === "download") {
+      else if (Input === "-d") {
         const fileName = await question("filename? ->");
         // USE NEW CONNECTION, AS DOWNLOAD EVENT WILL CUT THIS CONNECTION
         const conn = io(`ws://${this.successor_.address}`);
@@ -528,7 +438,7 @@ class Node {
         });
       }
       // HANDLE UPLOAD COMMAND
-      else if (Input === "-u" || Input === "upload") {
+      else if (Input === "-u") {
         // ASK THE FILE NAME TO UPLOAD
         const fileName = await question("filename? ->");
         // HASH GENERATE THE FILE NAME HASH
@@ -561,27 +471,38 @@ class Node {
         });
       }
       // HANLDE LEAVE
-      else if (Input === "Leave" || Input === "-l") {
+      else if (Input === "-l") {
         // CLOSE ALL CONNECTIONS AND STOP LISTENING
         this.socket_listen.close();
-        // clearInterval(this.pingInterval);
+        clearInterval(this.pingInterval);
         clearInterval(this.updateTableInterval);
 
-        // MAKE MY PREDECESSOR, MY SUCCESSOR'S PREDECESSOR
-        this.sucSocket_.emit(EVENTS.UPDATE_PREDECESSOR, this.predecessor_);
-        // MAKE MY PREDECESSOR THE LARGEST, IF I WERE LARGEST
-        if (this.largest_) {
-          this.predSocket_.emit(EVENTS.UPDATE_LARGEST, { val: true });
-        }
-        // MAKE MY SUCCESSOR, MY PREDECESSOR'S SUCCESSOR
-        this.predSocket_.emit(EVENTS.UPDATE_SUCCESSOR, this.successor_);
-        // MAKE MY GRAND-SUCCESSOR, MY PREDECESSOR'S GRAND-SUCCESSOR
-        this.predSocket_.emit(
-          EVENTS.UPDATE_GRAND_SUCCESSOR,
-          this.grandsuccessor_
-        );
-
         log(chalk.bgWhite.black("YOU LEFT THE NETWORK"));
+        process.exit(1);
+      }
+      // HANDLE SHOWING NEIGHBOUR NODES
+      else if (Input === "-n") {
+        this.print_neighbours();
+      }
+      // HANDLE SHOWING THE DHT
+      else if (Input === "-dht") {
+        get_files(`./${this.self_.address.split(":")[1]}`).then((files) => {
+          this.sucSocket_.emit(EVENTS.GET_DHT, {
+            origin: this.self_.id,
+            nodes: {
+              [this.self_.id]: this.self_.address,
+            },
+            files: files,
+          });
+        });
+      }
+      // HANDLE SHOWING FINGER TABLE
+      else if (Input === "-ft") {
+        this.print_table();
+      }
+      // HANDLE CLEARING CONSOLE
+      else if (Input === "-c") {
+        console.clear();
       }
     }
   }
